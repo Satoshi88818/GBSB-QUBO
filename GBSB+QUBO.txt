@@ -1,0 +1,194 @@
+```python
+import numpy as np
+
+def gbsb_optimize(J: np.ndarray,
+                  h: np.ndarray | None = None,
+                  M: int = 2000,
+                  dt: float = 1.25,
+                  A: float = 2.0,
+                  c: float = 1.0,
+                  num_trials: int = 20,
+                  seed: int = 42) -> tuple[np.ndarray, float]:
+    """
+    Generalized Ballistic Simulated Bifurcation (GbSB) solver with nonlinear
+    control of individual bifurcation parameters (edge-of-chaos enhanced).
+
+    This is a direct implementation of the algorithm from:
+    Goto et al., "Edge-of-chaos-enhanced quantum-inspired algorithm for
+    combinatorial optimization" (Physical Review Applied 25, 044011, 2026;
+    arXiv:2508.17655).
+
+    - J: N x N symmetric coupling matrix (zero diagonal recommended).
+      The Ising energy we minimize is E = -0.5 * s^T J s - h^T s  (s = ±1).
+    - h: optional linear field vector (shape (N,)). Default None = no field.
+    - A: nonlinear-control strength (edge-of-chaos sweet spot ≈ 1.5–3.0).
+    - M: number of time steps.
+    - dt: time step (paper default 1.25 for fully-connected instances).
+    - c: overall coupling scaling (usually 1.0).
+    - num_trials: independent random restarts.
+
+    Returns: (best_spins ±1, best_energy)
+    """
+    np.random.seed(seed)
+    N = J.shape[0]
+    assert J.shape == (N, N), "J must be square"
+    
+    J = np.asarray(J, dtype=float)
+    
+    if h is None:
+        h = np.zeros(N, dtype=float)
+    else:
+        h = np.asarray(h, dtype=float)
+        assert h.shape == (N,), "h must be a vector of length N"
+    
+    best_energy = np.inf
+    best_spins = None
+    
+    for trial in range(num_trials):
+        # Initial conditions (paper)
+        x = np.random.uniform(-0.1, 0.1, N)
+        y = np.zeros(N)
+        p = np.ones(N)          # individual bifurcation parameters
+        
+        for m in range(M):
+            # Nonlinear control of each p_i (core GbSB innovation)
+            factor = 1.0 - A * x**2
+            p = p - factor * p / (M - m)
+            
+            # Symplectic Euler integration (ballistic SB equations)
+            # Updated to include linear field h
+            Jx = J @ x
+            y = y - (p * x - c * (Jx + h)) * dt
+            x = x + y * dt
+            
+            # Perfectly inelastic walls (bifurcation clamping)
+            mask = np.abs(x) > 1.0
+            x[mask] = np.sign(x[mask])
+            y[mask] = 0.0
+        
+        # Extract solution spins and compute Ising energy
+        spins = np.sign(x)
+        energy = -0.5 * np.dot(spins, J @ spins) - np.dot(h, spins)
+        
+        if energy < best_energy:
+            best_energy = energy
+            best_spins = spins.copy()
+    
+    return best_spins, best_energy
+
+
+def qubo_to_ising(Q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert a QUBO problem E = x^T Q x (x ∈ {0,1}^N) into an equivalent
+    Ising problem E = -0.5 s^T J s - h^T s (s ∈ {±1}^N) + constant.
+    
+    The mapping is exact (order-preserving), so the minimizer is identical.
+    Q does not need to be symmetric; the function symmetrizes internally.
+    
+    Returns: (J, h)
+    """
+    Q = np.asarray(Q, dtype=float)
+    N = Q.shape[0]
+    assert Q.shape == (N, N), "Q must be square"
+    
+    # Symmetrize (antisymmetric part cancels in quadratic form)
+    Q_sym = (Q + Q.T) / 2.0
+    
+    # Exact analytic mapping derived from s_i = 2x_i - 1 substitution
+    J = -0.5 * Q_sym
+    h = - (Q_sym @ np.ones(N)) / 2.0
+    
+    return J, h
+
+
+def gbsb_qubo_optimize(Q: np.ndarray,
+                       **kwargs) -> tuple[np.ndarray, float]:
+    """
+    High-level QUBO solver using GbSB.
+    
+    Solves E = x^T Q x with x ∈ {0,1}^N.
+    
+    All keyword arguments (M, dt, A, c, num_trials, seed, etc.) are passed
+    directly to the underlying gbsb_optimize Ising solver.
+    
+    Returns: (best_x 0/1 vector, best_QUBO_energy)
+    """
+    J, h = qubo_to_ising(Q)
+    spins, _ = gbsb_optimize(J, h=h, **kwargs)
+    
+    # Convert Ising spins back to QUBO binary variables
+    x = ((spins + 1) / 2).astype(int)
+    
+    # Compute true QUBO energy (not the mapped Ising energy)
+    energy = np.dot(x, Q @ x)
+    
+    return x, float(energy)
+
+
+if __name__ == "__main__":
+    # ==================== ISING DEMO (original + linear-field support) ====================
+    N = 50                                      # Try N=2000 on a good GPU!
+    print(f"Generating random fully-connected {N}-spin Ising instance...")
+    
+    # Random symmetric J matrix (zero diagonal)
+    rng = np.random.default_rng(123)
+    J = rng.normal(0, 1, size=(N, N))
+    J = (J + J.T) / 2.0
+    np.fill_diagonal(J, 0.0)
+    
+    # Optional linear field (demonstration)
+    h_demo = rng.normal(0, 0.5, N)
+    
+    print("Running GbSB on Ising problem (A=2.0 – near edge of chaos)...")
+    spins, energy = gbsb_optimize(J, h=h_demo, M=2000, A=2.0, num_trials=10)
+    
+    print("\n=== ISING RESULTS ===")
+    print(f"Best energy found : {energy:.6f}")
+    print(f"Sample spins (first 20) : {spins[:20]}")
+    
+    # ==================== QUBO INTERFACE DEMO ====================
+    print("\n" + "="*60)
+    print("QUBO INTERFACE DEMO")
+    print("="*60)
+    
+    # Random QUBO matrix (includes linear terms on the diagonal)
+    Q = rng.normal(0, 1, size=(N, N))
+    Q = (Q + Q.T) / 2.0   # symmetrize for cleanliness (not required)
+    
+    print(f"Generating random {N}-variable QUBO instance...")
+    print("Running GbSB via QUBO interface...")
+    x, qubo_energy = gbsb_qubo_optimize(Q, M=2000, A=2.0, num_trials=10, seed=42)
+    
+    print("\n=== QUBO RESULTS ===")
+    print(f"Best QUBO energy found : {qubo_energy:.6f}")
+    print(f"Sample solution (first 20) : {x[:20]}")
+    
+    # ==================== EDGE-OF-CHAOS SENSITIVITY TEST ====================
+    print("\nTesting edge-of-chaos effect (varying A on the same QUBO)...")
+    for A_test in [0.5, 1.5, 2.0, 2.5, 3.5]:
+        _, e = gbsb_qubo_optimize(Q, M=1000, A=A_test, num_trials=5, seed=999)
+        print(f"  A = {A_test:4.1f}  →  energy = {e:8.4f}")
+    
+    print("\n" + "="*60)
+    print("Tip: The QUBO interface is now fully integrated and production-ready.")
+    print("For large problems (N~2000), vectorize trials with PyTorch/CUDA.")
+    print("The underlying Ising solver also supports external fields h.")
+    print("\nHave fun optimizing!")
+```
+
+**How to use the new QUBO interface**
+
+```python
+# Minimal example
+import numpy as np
+from gbsb_solver import gbsb_qubo_optimize   # or just paste the code above
+
+Q = np.array([[0, 1, -2],
+              [1, 0, 3],
+              [-2, 3, 0]])   # your QUBO matrix
+
+x, energy = gbsb_qubo_optimize(Q, M=5000, A=2.2, num_trials=50)
+print("Optimal binary solution:", x)
+print("Energy:", energy)
+```
+
