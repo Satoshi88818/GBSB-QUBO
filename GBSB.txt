@@ -1,0 +1,96 @@
+import numpy as np
+
+def gbsb_optimize(J: np.ndarray,
+                  M: int = 2000,
+                  dt: float = 1.25,
+                  A: float = 2.0,
+                  c: float = 1.0,
+                  num_trials: int = 20,
+                  seed: int = 42) -> tuple[np.ndarray, float]:
+    """
+    Generalized Ballistic Simulated Bifurcation (GbSB) solver with nonlinear
+    control of individual bifurcation parameters (edge-of-chaos enhanced).
+
+    This is a direct implementation of the algorithm from:
+    Goto et al., "Edge-of-chaos-enhanced quantum-inspired algorithm for
+    combinatorial optimization" (Physical Review Applied 25, 044011, 2026;
+    arXiv:2508.17655).
+
+    - J: N x N symmetric coupling matrix (zero diagonal recommended).
+      The Ising energy we minimize is E = -0.5 * s^T J s  (s = ±1).
+    - A: nonlinear-control strength. Success probability peaks near the
+      "edge of chaos" (typically A ≈ 1.5–3.0; tune this parameter!).
+    - M: number of time steps (larger = better accuracy, slower).
+    - dt: time step (paper uses 1.25 for random fully-connected instances).
+    - c: overall coupling scaling (usually 1.0).
+    - num_trials: independent random restarts (parallelizable on GPU).
+
+    Returns: (best_spins, best_energy)
+    """
+    np.random.seed(seed)
+    N = J.shape[0]
+    assert J.shape == (N, N), "J must be square"
+    
+    best_energy = np.inf
+    best_spins = None
+    
+    for trial in range(num_trials):
+        # Initial conditions (paper)
+        x = np.random.uniform(-0.1, 0.1, N)
+        y = np.zeros(N)
+        p = np.ones(N)          # individual bifurcation parameters
+        
+        for m in range(M):
+            # Nonlinear control of each p_i  (core GbSB innovation)
+            factor = 1.0 - A * x**2
+            p = p - factor * p / (M - m)
+            
+            # Symplectic Euler integration (ballistic SB equations)
+            Jx = J @ x
+            y = y - (p * x - c * Jx) * dt
+            x = x + y * dt
+            
+            # Perfectly inelastic walls (bifurcation clamping)
+            mask = np.abs(x) > 1.0
+            x[mask] = np.sign(x[mask])
+            y[mask] = 0.0
+        
+        # Extract solution spins and compute Ising energy
+        spins = np.sign(x)
+        energy = -0.5 * np.dot(spins, J @ spins)
+        
+        if energy < best_energy:
+            best_energy = energy
+            best_spins = spins.copy()
+    
+    return best_spins, best_energy
+
+
+if __name__ == "__main__":
+    # ==================== DEMO ====================
+    N = 50                                      # Try N=2000 on a good GPU!
+    print(f"Generating random fully-connected {N}-spin Ising instance...")
+    
+    # Random symmetric J matrix (zero diagonal) – typical test case
+    rng = np.random.default_rng(123)
+    J = rng.normal(0, 1, size=(N, N))
+    J = (J + J.T) / 2.0                        # make symmetric
+    np.fill_diagonal(J, 0.0)
+    
+    # Solve with edge-of-chaos tuning
+    print("Running GbSB (A=2.0 – near edge of chaos)...")
+    spins, energy = gbsb_optimize(J, M=2000, A=2.0, num_trials=10)
+    
+    print("\n=== RESULTS ===")
+    print(f"Best energy found : {energy:.6f}")
+    print(f"Sample spins (first 20) : {spins[:20]}")
+    print("\nTip: Experiment with different A values (1.0–3.0) to find")
+    print("the 'edge of chaos' where success probability jumps dramatically.")
+    print("For production use on large problems (N~2000), vectorize trials")
+    print("with PyTorch/CUDA or run on FPGA as Toshiba does.")
+    
+    # Quick sensitivity test for A (edge-of-chaos demonstration)
+    print("\nTesting edge-of-chaos effect (varying A)...")
+    for A_test in [0.5, 1.5, 2.0, 2.5, 3.5]:
+        _, e = gbsb_optimize(J, M=1000, A=A_test, num_trials=5, seed=999)
+        print(f"  A = {A_test:4.1f}  →  energy = {e:8.4f}")
